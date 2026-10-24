@@ -83,17 +83,18 @@ show_help() {
 Usage: ./install.sh [OPTIONS]
 
 Options:
-    -a, --all        Run all installation tasks without prompting
-    -s, --symlink    Symlink configs instead of copying (ideal for active dotfiles)
-    -d, --dry-run    Show actions without executing commands or modifying files
-    --upgrade        Run system upgrade only
-    --packages       Run granular package install prompts only
-    --git            Run git configuration only
-    --theme          Run GTK dark theme setup only
-    --sway           Run Sway WM setup only
-    --nvim           Run Neovim setup only
-    --timeshift      Run Timeshift snapshot only
-    -h, --help       Show this help message
+    -a, --all         Run all installation tasks without prompting
+    -s, --symlink     Symlink configs instead of copying (ideal for active dotfiles)
+    -d, --dry-run     Show actions without executing commands or modifying files
+    --upgrade         Run system upgrade only
+    --packages        Run granular package install prompts only
+    --python312       Install Python 3.12 and set user defaults only
+    --git             Run git configuration only
+    --theme           Run GTK dark theme setup only
+    --sway            Run Sway WM setup only
+    --nvim            Run Neovim setup only
+    --timeshift       Run Timeshift snapshot only
+    -h, --help        Show this help message
 EOF
 }
 
@@ -116,21 +117,42 @@ task_system_upgrade() {
 
 task_packages() {
     echo "--- Package Selection ---"
-    
-    # 1. Base VCS & Editor
     run_dnf_install "Core Tools" git neovim
-
-    # 2. C/C++ Compiler Toolchain & Language Servers
     run_dnf_install "C/C++ Build Toolchain" gcc gcc-c++ clang-tools-extra
-
-    # 3. Python Ecosystem
-    run_dnf_install "Python & Pip" python3 python3-pip
-
-    # 4. Search and Terminal Utilities (Telescope dependencies)
     run_dnf_install "Search Utilities (ripgrep, fd)" ripgrep fd-find
-
-    # 5. System Snapshot Utility
     run_dnf_install "Backup Utility (Timeshift)" timeshift
+}
+
+task_python312() {
+    if prompt_user "Install Python 3.12 & set as user-level default"; then
+        log_info "Installing Python 3.12 via dnf..."
+        if [[ "${FLAG_DRY_RUN}" == true ]]; then
+            log_info "[DRY-RUN] sudo dnf install -y python3.12 python3.12-devel"
+            log_info "[DRY-RUN] python3.12 -m ensurepip --upgrade"
+            log_info "[DRY-RUN] Link python3.12 -> ~/.local/bin/python & python3"
+            return 0
+        fi
+
+        # Install runtime and development headers
+        sudo dnf install -y python3.12 python3.12-devel
+
+        # Bootstrap pip for 3.12
+        python3.12 -m ensurepip --default-pip --user
+
+        # Create symlinks in ~/.local/bin
+        mkdir -p "${HOME}/.local/bin"
+        ln -sf /usr/bin/python3.12 "${HOME}/.local/bin/python"
+        ln -sf /usr/bin/python3.12 "${HOME}/.local/bin/python3"
+
+        # Ensure PATH is exported in ~/.bashrc
+        if ! grep -q 'export PATH="\$HOME/\.local/bin:\$PATH"' "${HOME}/.bashrc"; then
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
+        fi
+
+        log_done "Python 3.12 configured as user default in ~/.local/bin."
+    else
+        log_skip "Python 3.12 Installation & Setup"
+    fi
 }
 
 task_git() {
@@ -236,6 +258,7 @@ while [[ $# -gt 0 ]]; do
         -d|--dry-run) FLAG_DRY_RUN=true; shift ;;
         --upgrade) SINGLE_TASK="system_upgrade"; shift ;;
         --packages) SINGLE_TASK="packages"; shift ;;
+        --python312) SINGLE_TASK="python312"; shift ;;
         --git) SINGLE_TASK="git"; shift ;;
         --theme) SINGLE_TASK="theme"; shift ;;
         --sway) SINGLE_TASK="sway"; shift ;;
@@ -257,6 +280,7 @@ if [[ -n "${SINGLE_TASK}" ]]; then
 else
     task_system_upgrade
     task_packages
+    task_python312
     task_git
     task_theme
     task_sway
