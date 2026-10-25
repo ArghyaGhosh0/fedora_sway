@@ -9,8 +9,12 @@ INSTALLER_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_6
 TEMP_DIR="${TMPDIR:-/tmp}"
 INSTALLER="${TEMP_DIR}/Miniconda3-latest-Linux-x86_64.sh"
 
-REQUIRED_HOME_SPACE_MB=2048  # 2 GB (Miniconda needs ~500 MB to 1 GB)
-REQUIRED_TMP_SPACE_MB=300    # 300 MB
+ENV_NAME="p312"
+PYTHON_VERSION="3.12"
+
+# 4 GB recommended for Miniconda + Python 3.12 env + Jupyter packages + wheels
+REQUIRED_HOME_SPACE_MB=4096
+REQUIRED_TMP_SPACE_MB=500
 
 # -----------------------------------------------------------------------------
 # UI Helpers
@@ -47,11 +51,10 @@ run_prechecks() {
 
     # 3. Target directory & path collision check
     if [[ -d "${MINICONDA_DIR}" ]]; then
-        log_err "Target directory already exists: ${MINICONDA_DIR}"
-        log_warn "Remove or rename the existing directory before running."
-        failed=1
+        log_warn "Target directory already exists: ${MINICONDA_DIR}"
+        log_info "Will skip Miniconda base install and configure the Python ${PYTHON_VERSION} Jupyter env."
     elif [[ -e "${MINICONDA_DIR}" ]]; then
-        log_err "A file already exists at target path: ${MINICONDA_DIR}"
+        log_err "A file exists at target path: ${MINICONDA_DIR}"
         failed=1
     else
         log_pass "Path check: ${MINICONDA_DIR} is clear"
@@ -82,7 +85,7 @@ run_prechecks() {
     tmp_avail=$(df -m "${TEMP_DIR}" | awk 'NR==2 {print $4}')
 
     if [[ "${home_avail}" -lt "${REQUIRED_HOME_SPACE_MB}" ]]; then
-        log_err "Insufficient disk space in ${HOME}. Required: ${REQUIRED_HOME_SPACE_MB} MB (~2 GB), Available: ${home_avail} MB"
+        log_err "Insufficient disk space in ${HOME}. Required: ${REQUIRED_HOME_SPACE_MB} MB (~4 GB), Available: ${home_avail} MB"
         failed=1
     else
         log_pass "Disk check (${HOME}): ${home_avail} MB available"
@@ -117,7 +120,7 @@ run_prechecks() {
     # Abort if any precheck failed
     if [[ "${failed}" -ne 0 ]]; then
         echo "------------------------------------------"
-        log_err "Pre-flight checks failed. Aborting installation."
+        log_err "Pre-flight checks failed. Aborting setup."
         exit 1
     fi
 
@@ -137,42 +140,105 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # -----------------------------------------------------------------------------
+# Miniconda Base Installation
+# -----------------------------------------------------------------------------
+install_miniconda() {
+    if [[ -d "${MINICONDA_DIR}" ]]; then
+        log_info "Miniconda already present at ${MINICONDA_DIR}. Skipping bootstrap."
+        return 0
+    fi
+
+    echo "------------------------------------------"
+    log_info "Downloading Miniconda installer..."
+    curl -# -L "${INSTALLER_URL}" -o "${INSTALLER}"
+
+    if [[ ! -s "${INSTALLER}" ]] || ! head -n 1 "${INSTALLER}" | grep -q "sh"; then
+        log_err "Downloaded file is corrupted or invalid."
+        rm -f "${INSTALLER}"
+        exit 1
+    fi
+
+    log_info "Installing Miniconda3 to ${MINICONDA_DIR}..."
+    bash "${INSTALLER}" -b -p "${MINICONDA_DIR}"
+    rm -f "${INSTALLER}"
+
+    log_info "Initializing Conda for Bash..."
+    "${MINICONDA_DIR}/bin/conda" init bash
+
+    log_info "Disabling auto-activation of base environment..."
+    "${MINICONDA_DIR}/bin/conda" config --set auto_activate_base false
+}
+
+# -----------------------------------------------------------------------------
+# Setup Python 3.12 & Jupyter Environment
+# -----------------------------------------------------------------------------
+setup_jupyter_env() {
+    local conda_bin="${MINICONDA_DIR}/bin/conda"
+
+    echo "------------------------------------------"
+    log_info "Configuring Conda environment '${ENV_NAME}' with Python ${PYTHON_VERSION}..."
+
+    if "${conda_bin}" env list | grep -qE "^${ENV_NAME}\s"; then
+        log_warn "Environment '${ENV_NAME}' already exists. Updating packages..."
+        "${conda_bin}" install -y -n "${ENV_NAME}" -c conda-forge \
+            "python=${PYTHON_VERSION}" jupyterlab notebook ipykernel nb_conda_kernels
+    else
+        "${conda_bin}" create -y -n "${ENV_NAME}" -c conda-forge \
+            "python=${PYTHON_VERSION}" jupyterlab notebook ipykernel nb_conda_kernels
+    fi
+
+    log_info "Registering Python 3.12 ipykernel..."
+    "${MINICONDA_DIR}/envs/${ENV_NAME}/bin/python" -m ipykernel install \
+        --user \
+        --name "${ENV_NAME}" \
+        --display-name "Python 3.12 (${ENV_NAME})"
+
+    # Sway / Wayland friendly default config
+    log_info "Configuring Jupyter defaults..."
+    local jupyter_config_dir="${HOME}/.jupyter"
+    mkdir -p "${jupyter_config_dir}"
+
+    local jupyter_conf="${jupyter_config_dir}/jupyter_notebook_config.py"
+    touch "${jupyter_conf}"
+
+    # Do not attempt to pop open browser windows automatically in tiling Wayland sessions
+    if ! grep -q "c.ServerApp.open_browser" "${jupyter_conf}"; then
+        echo "c.ServerApp.open_browser = False" >> "${jupyter_conf}"
+    fi
+
+    # Create a quick launcher binary in ~/.local/bin
+    mkdir -p "${HOME}/.local/bin"
+    cat << 'EOF' > "${HOME}/.local/bin/run-jupyter"
+#!/usr/bin/env bash
+source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+conda activate p312
+exec jupyter lab "$@"
+EOF
+    chmod +x "${HOME}/.local/bin/run-jupyter"
+}
+
+# -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
 echo "=========================================="
-echo " Miniconda3 Lightweight Installer"
+echo " Miniconda3 + Python 3.12 Jupyter Setup"
 echo " Target path: ${MINICONDA_DIR}"
+echo " Target Env : ${ENV_NAME} (Python ${PYTHON_VERSION})"
 echo "=========================================="
 
 run_prechecks
-
-echo "------------------------------------------"
-log_info "Downloading Miniconda installer (~140 MB)..."
-curl -# -L "${INSTALLER_URL}" -o "${INSTALLER}"
-
-# Verify file header
-if [[ ! -s "${INSTALLER}" ]] || ! head -n 1 "${INSTALLER}" | grep -q "sh"; then
-    log_err "Downloaded file is corrupted or invalid."
-    rm -f "${INSTALLER}"
-    exit 1
-fi
-
-log_info "Installing Miniconda3 (-b)..."
-bash "${INSTALLER}" -b -p "${MINICONDA_DIR}"
-
-log_info "Removing installer..."
-rm -f "${INSTALLER}"
-
-log_info "Initializing Conda for Bash..."
-"${MINICONDA_DIR}/bin/conda" init bash
-
-log_info "Disabling auto-activation of base environment..."
-"${MINICONDA_DIR}/bin/conda" config --set auto_activate_base false
+install_miniconda
+setup_jupyter_env
 
 echo "=========================================="
-log_pass "Miniconda3 installed at: ${MINICONDA_DIR}"
-echo "To use conda, run:"
+log_pass "Installation completed successfully."
+echo ""
+echo "Verify setup:"
 echo "    source ~/.bashrc"
-echo "Then activate environments when needed:"
-echo "    conda activate <env_name>"
+echo "    conda activate ${ENV_NAME}"
+echo "    python --version   # (will report Python 3.12.x)"
+echo ""
+echo "Launch Jupyter:"
+echo "    run-jupyter"
+echo "    # or: conda activate ${ENV_NAME} && jupyter lab"
 echo "=========================================="
